@@ -891,7 +891,7 @@ plt.imsave("output.png", im)
 
     def update_display(self):
         if self.no_update or not self.export_window.isVisible():
-            return
+            pass
         #print(self.get_parameters())
         #self.set_parameters(self.get_parameters())
         #if self.current_tab_selected is False:
