@@ -23,7 +23,7 @@ def render_2d(params, result, exporter=None):
     if params["scalebar"]["hide"] is False:
         pil_image = render_2d_scalebar(params, result, pil_image, im_scale, aa_scale)
     if disp_params != None and params["colorbar"]["hide"] is False:
-        pil_image = render_2d_colorbar(params, result, pil_image, im_scale, aa_scale, scale_max=disp_params["scale_max"], colormap=disp_params["colormap"])
+        pil_image = render_2d_colorbar(params, result, pil_image, im_scale, aa_scale, scale_max=disp_params["scale_max"], colormap=disp_params["colormap"], unit=disp_params["scalebar_unit"])
 
     pil_image = render_2d_time(params, result, pil_image)
 
@@ -75,16 +75,17 @@ def render_2d_image(params, result, exporter):
 
 def render_2d_arrows(params, result, pil_image, im_scale, aa_scale, display_image, return_scale=False):
     def project_data(R, field, skip=1):
-        length = np.linalg.norm(field, axis=1)
+        length2 = np.linalg.norm(field[:, :2], axis=1)
+        length3 = np.linalg.norm(field[:, :3], axis=1)
         angle = np.arctan2(field[:, 1], field[:, 0])
-        data = pd.DataFrame(np.hstack((R, length[:, None], angle[:, None])),
-                            columns=["x", "y", "length", "angle"])
-        data = data.sort_values(by="length", ascending=False)
+        data = pd.DataFrame(np.hstack((R, length2[:, None], length3[:, None], angle[:, None])),
+                            columns=["x", "y", "length2", "length3", "angle"])
+        data = data.sort_values(by="length2", ascending=False)
         d2 = data.groupby(["x", "y"]).first()
         # optional slice
         if skip > 1:
             d2 = d2.loc[(slice(None, None, skip), slice(None, None, skip)), :]
-        return np.array([i for i in d2.index]), d2[["length", "angle"]]
+        return np.array([i for i in d2.index]), d2[["length2", "angle", "length3"]]
 
     mesh, field, params_arrows, name = get_mesh_arrows(params, result)
 
@@ -113,23 +114,41 @@ def render_2d_arrows(params, result, pil_image, im_scale, aa_scale, display_imag
         R = mesh.nodes.copy()
         is3D = R.shape[1] == 3
         field = field.copy()
+        max_length = np.nanpercentile(np.linalg.norm(field, axis=1), 99.9)
+
+        field_to_pixel_factor = 1
+        scale_max_to_pixel_factor = 1
+        scalebar_unit = "px"
+
         if getattr(mesh, "units", None) == "pixels":
             R = R[:, :2]
             R[:, 1] = display_image[0].shape[0] - R[:, 1]
             field = field[:, :2] * params_arrows["arrow_scale"]
             field[:, 1] = -field[:, 1]
         else:  # "microns" + 3D
-            R = R[:, :2][:, ::-1] * scale + offset
-            field = field[:, :2][:, ::-1] * scale * params_arrows["arrow_scale"]
+            R = R[:, :2][:, ::-1] * scale + offset[::-1]
+            field = field[:, :][:, [1, 0, 2]]
+            field_to_pixel_factor = scale * params_arrows["arrow_scale"]
 
             if name == "forces":
-                field *= 1e4
+                scalebar_unit = "pN"
+                max_length *= 1e12
+                scale_max_to_pixel_factor = 1e12
+                field_to_pixel_factor *= 1e6
+            else:
+                scalebar_unit = "µm"
+                max_length *= 1e6
+                scale_max_to_pixel_factor = 1e6
+
+            norm_stack_size = np.abs(np.max(R) - np.min(R))
+            scalebar_max = params["deformation_arrows"]["scale_max"]
+            if params["deformation_arrows"]["autoscale"]:
+                field_to_pixel_factor *= 0.1 * norm_stack_size / np.nanmax(field*scale_max_to_pixel_factor)  # np.nanpercentile(point_cloud[name + "_mag2"], 99.9)
+            else:
+                field_to_pixel_factor *= 0.1 * norm_stack_size / scalebar_max
 
         if scale_max is None:
-            max_length = np.nanmax(np.linalg.norm(field, axis=1))# * params_arrows["arrow_scale"]
-            scale_max = max_length / params_arrows["arrow_scale"]
-        else:
-            max_length = scale_max * params_arrows["arrow_scale"]
+            scale_max = max_length
 
         if is3D:
             z_center = (params["stack"]["z"] - result.stacks[0].shape[2] / 2) * display_image[1][2] * 1e-6
@@ -147,14 +166,22 @@ def render_2d_arrows(params, result, pil_image, im_scale, aa_scale, display_imag
             field = pd.DataFrame(np.hstack((length[:, None], angle[:, None])), columns=["length", "angle"])
         # safety check if all arrows where filtered out
         if R.shape[0] != 0:
-            pil_image = add_quiver(pil_image, R, field.length, field.angle, max_length=max_length, cmap=colormap,
-                                   alpha=alpha,
+            # get the colormap
+            cmap = plt.get_cmap(colormap)
+            # calculate the colors of the arrows
+            colors = cmap(field.length3 * scale_max_to_pixel_factor / scale_max)
+            # set the transparency
+            colors[:, 3] = alpha
+            # make colors uint8
+            colors = (colors * 255).astype(np.uint8)
+
+            pil_image = add_quiver(pil_image, R, field.length3 * field_to_pixel_factor, field.angle, colors,
                                    scale=im_scale * aa_scale,
                                    width=params["2D_arrows"]["width"],
                                    headlength=params["2D_arrows"]["headlength"],
                                    headheight=params["2D_arrows"]["headheight"])
     if return_scale:
-        return pil_image, {"scale_max": scale_max, "colormap": colormap}
+        return pil_image, {"scale_max": scale_max, "colormap": colormap, "scalebar_unit": scalebar_unit}
     return pil_image
 
 
@@ -193,7 +220,7 @@ def render_2d_scalebar(params, result, pil_image, im_scale, aa_scale):
                              size_in_um=mu, color=color, unit="µm")
     return pil_image
 
-def render_2d_colorbar(params, result, pil_image, im_scale, aa_scale, colormap="viridis", scale_max=1):
+def render_2d_colorbar(params, result, pil_image, im_scale, aa_scale, colormap="viridis", scale_max=1, unit="µm"):
     color = "k"
     if params["theme"] == "dark":
         color = "w"
@@ -210,6 +237,7 @@ def render_2d_colorbar(params, result, pil_image, im_scale, aa_scale, colormap="
                              offset_y=-params["colorbar"]["ypos"] * aa_scale,
                              fontsize=params["colorbar"]["fontsize"] * aa_scale,
                              color=color,
+                             unit=unit
                              )
 
     return pil_image
@@ -239,40 +267,6 @@ def render_2d_logo(params, result, pil_image, aa_scale):
 
         pil_image = pil_image.convert("RGBA")
         pil_image.alpha_composite(im_logo, dest=(pil_image.width - im_logo.width - padding, padding))
-    return pil_image
-
-
-def add_quiver(pil_image, R, lengths, angles, max_length, cmap, alpha=1, scale=1):
-    cmap = plt.get_cmap(cmap)
-    image = ImageDraw.ImageDraw(pil_image, "RGBA")
-    def getarrow(length, width=2, headlength=5, headheight=5):
-        length *= scale
-        width *= scale
-        headlength *= scale
-        headheight *= scale
-        if length < headlength:
-            headheight = headheight*length/headlength
-            headlength = length
-            return [(length - headlength, headheight / 2),
-                    (length, 0),
-                    (length - headlength, -headheight / 2)]
-        return [(0, width/2), (length-headlength, width/2), (length-headlength, headheight/2), (length, 0),
-                (length-headlength, -headheight/2), (length-headlength, -width/2), (0, -width/2)]
-
-    def get_offset(arrow, pos, angle):
-        arrow = np.array(arrow)
-        rot = [[np.cos(np.deg2rad(angle)), np.sin(np.deg2rad(angle))], [-np.sin(np.deg2rad(angle)), np.cos(np.deg2rad(angle))]]
-        arrow = arrow @ rot
-        r = np.array(arrow) + np.array(pos)*scale
-        return [tuple(i) for i in r]
-
-    #max_length = np.nanmax(lengths)
-    for i in range(len(R)):
-        angle = angles.iloc[i]
-        length = lengths.iloc[i]
-        color = tuple((np.asarray(cmap(length/max_length))*255).astype(np.uint8))
-        color = (color[0], color[1], color[2], int(alpha*255))
-        image.polygon(get_offset(getarrow(length), R[i], np.rad2deg(angle)), fill=color, outline=color)
     return pil_image
 
 
@@ -309,7 +303,7 @@ def add_colorbar(pil_image,
                  max_v=10,
                  offset_x=15,
                  offset_y=-10,
-                 scale=1, fontsize=16, color="w"):
+                 scale=1, fontsize=16, color="w", unit="m"):
     cmap = plt.get_cmap(colormap)
     offset_x = int(offset_x * scale)
     offset_y = int(offset_y * scale)
@@ -347,13 +341,31 @@ def add_colorbar(pil_image,
     locator = ticker.MaxNLocator(nbins=tick_count - 1)
     #tick_positions = locator.tick_values(min_v, max_v)
     tick_positions = np.linspace(min_v, max_v, tick_count)
+
+    max_value = tick_positions[-1]
+    factor = 1
+    power = 0
+    if max_value:
+        power = int(np.floor(np.log10(max_value)/3)*3)
+        factor = 10**power
+    base_factor = 0
+    factor_prefix = {6: "M", 3: "k", -3: "m", -6: "µ", -9: "n", -12: "p"}
+    if unit.startswith("p"):
+        unit = unit[1:]
+        base_power = -12
+        unit = factor_prefix[power+base_power]+unit
+    if unit.startswith("µ") or unit.startswith("u"):
+        unit = unit[1:]
+        base_power = -6
+        unit = factor_prefix[power + base_power]+unit
+
     for i, pos in enumerate(tick_positions):
         x0 = offset_x + (bar_width - tick_width - 1) / (tick_count - 1) * i
         y0 = offset_y - bar_height - 1
 
         image.rectangle([x0, y0-tick_height, x0+tick_width, y0], fill=color)
 
-        text = "%d" % pos
+        text = "%d" % (pos/factor)
         length_number = image.textlength(text, font=font)
         height_number = image.textbbox((0, 0), text, font=font)[3]
 
@@ -361,6 +373,11 @@ def add_colorbar(pil_image,
         y = y0 - height_number - tick_height - int(np.ceil(tick_height/2))
         # draw the text for the number and the unit
         image.text((x, y), text, color, font=font)
+    if unit:
+        height_number = image.textbbox((0, 0), unit, font=font)[3]
+        x0 = offset_x + bar_width + 10
+        y0 = offset_y - bar_height  / 2 - height_number /2
+        image.text((x0, y0), unit, color, font=font)
     #image.rectangle([pil_image.size[0]-10, 0, pil_image.size[0], 10], fill="w")
     return pil_image
 
@@ -449,16 +466,7 @@ def getarrow(length, angle, scale=1, width=2, headlength=5, headheight=5, offset
     return arrows
 
 
-def add_quiver(pil_image, R, lengths, angles, max_length, cmap, alpha=1, scale=1, width=2, headlength=5, headheight=5):
-    # get the colormap
-    cmap = plt.get_cmap(cmap)
-    # calculate the colors of the arrows
-    colors = cmap(lengths / max_length)
-    # set the transparancy
-    colors[:, 3] = alpha
-    # make colors uint8
-    colors = (colors*255).astype(np.uint8)
-
+def add_quiver(pil_image, R, lengths, angles, colors, scale=1, width=2, headlength=5, headheight=5):
     # get the arrows
     arrows = getarrow(lengths, angles, scale=scale, width=width, headlength=headlength, headheight=headheight, offset=R*scale)
 

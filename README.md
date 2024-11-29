@@ -21,13 +21,17 @@ Check out our [Documentation](https://saenopy.readthedocs.io) on how to install 
 ## Installation
 
 ### Standalone
-To use saenopy without a complicated installation you can use our standalone binaries to get started right away on Windows or Linux.
+To use saenopy without a complicated installation you can use our standalone binaries to get started right away.
 
 Windows
 https://github.com/rgerum/saenopy/releases/download/v1.0.6/saenopy.exe
 
 Linux
 https://github.com/rgerum/saenopy/releases/download/v1.0.6/saenopy
+
+MacOS
+https://github.com/rgerum/saenopy/releases/download/v1.0.6/saenopy_mac.app.zip
+
 
 ### Using Python
 
